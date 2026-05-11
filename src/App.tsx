@@ -1,24 +1,25 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import {
   useAccount,
   useConnect,
   useDisconnect,
-  useSendTransaction,
+  useWriteContract,
   useWaitForTransactionReceipt,
+  useReadContract,
+  usePublicClient,
 } from 'wagmi'
-import { injected, walletConnect } from 'wagmi/connectors'
-import { parseEther } from 'viem'
-import { Sun, Wallet, LogOut, ExternalLink, Loader2, CheckCircle2, AlertCircle, Copy, Check } from 'lucide-react'
-import { arcTestnet, projectId } from './config/wagmi'
+import { injected } from 'wagmi/connectors'
+import {
+  Sun, Wallet, LogOut, ExternalLink, Loader2,
+  CheckCircle2, AlertCircle, Copy, Check, RefreshCw,
+} from 'lucide-react'
+import { arcTestnet } from './config/wagmi'
+import { GM_CONTRACT_ADDRESS, GM_ABI } from './config/contract'
 
-// GM calldata (0x474d = "GM" in hex) sent to this vanity address
-const GM_ADDRESS = '0x000000000000000000000000000000000000474d' as const
-const GM_HEX = '0x474d'
-
-interface GmRecord {
+interface GmEvent {
+  sender: string
+  timestamp: bigint
   txHash: string
-  address: string
-  timestamp: number
 }
 
 function shortenAddress(addr: string) {
@@ -29,61 +30,100 @@ function shortenHash(hash: string) {
   return `${hash.slice(0, 10)}…${hash.slice(-6)}`
 }
 
-function timeAgo(ts: number) {
-  const diff = Math.floor((Date.now() - ts) / 1000)
+function timeAgo(ts: bigint) {
+  const diff = Math.floor(Date.now() / 1000) - Number(ts)
   if (diff < 60) return `${diff}s ago`
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-  return `${Math.floor(diff / 3600)}h ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
 }
 
 export default function App() {
   const { address, isConnected, chain } = useAccount()
   const { connect, isPending: isConnecting } = useConnect()
   const { disconnect } = useDisconnect()
-  const [gmRecords, setGmRecords] = useState<GmRecord[]>([])
-  const [copied, setCopied] = useState(false)
-  const [showWalletMenu, setShowWalletMenu] = useState(false)
+  const publicClient = usePublicClient()
 
+  const [recentGMs, setRecentGMs] = useState<GmEvent[]>([])
+  const [loadingEvents, setLoadingEvents] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  // Read total GM count from contract
+  const { data: totalGMs, refetch: refetchTotal } = useReadContract({
+    address: GM_CONTRACT_ADDRESS,
+    abi: GM_ABI,
+    functionName: 'totalGMs',
+  })
+
+  // Read how many times this wallet has said GM
+  const { data: myGMCount, refetch: refetchMyCount } = useReadContract({
+    address: GM_CONTRACT_ADDRESS,
+    abi: GM_ABI,
+    functionName: 'gmCount',
+    args: address ? [address] : undefined,
+    query: { enabled: !!address },
+  })
+
+  // Send GM transaction
   const {
-    sendTransaction,
+    writeContract,
     data: txHash,
     isPending: isSending,
     error: sendError,
-    reset: resetSend,
-  } = useSendTransaction()
+    reset: resetWrite,
+  } = useWriteContract()
 
-  const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
-    hash: txHash,
-  })
+  const { isLoading: isConfirming, isSuccess: isConfirmed } =
+    useWaitForTransactionReceipt({ hash: txHash })
 
-  // Load saved GMs from localStorage on mount
-  useEffect(() => {
-    const saved = localStorage.getItem('gm-records')
-    if (saved) {
-      try { setGmRecords(JSON.parse(saved)) } catch { /* ignore */ }
-    }
-  }, [])
-
-  // Save new confirmed GM to history
-  useEffect(() => {
-    if (isConfirmed && txHash && address) {
-      const newRecord: GmRecord = { txHash, address, timestamp: Date.now() }
-      setGmRecords(prev => {
-        const updated = [newRecord, ...prev].slice(0, 20)
-        localStorage.setItem('gm-records', JSON.stringify(updated))
-        return updated
+  // Fetch recent GM events from the blockchain
+  const fetchEvents = useCallback(async () => {
+    if (!publicClient) return
+    setLoadingEvents(true)
+    try {
+      const logs = await publicClient.getLogs({
+        address: GM_CONTRACT_ADDRESS,
+        event: GM_ABI[3], // GMSent event
+        fromBlock: 0n,
+        toBlock: 'latest',
       })
+      const events: GmEvent[] = logs
+        .slice(-20)
+        .reverse()
+        .map((log) => ({
+          sender: log.args.sender as string,
+          timestamp: log.args.timestamp as bigint,
+          txHash: log.transactionHash ?? '',
+        }))
+      setRecentGMs(events)
+    } catch (e) {
+      console.error('Failed to fetch events:', e)
+    } finally {
+      setLoadingEvents(false)
     }
-  }, [isConfirmed, txHash, address])
+  }, [publicClient])
+
+  useEffect(() => {
+    fetchEvents()
+  }, [fetchEvents])
+
+  // Refetch everything after a GM is confirmed
+  useEffect(() => {
+    if (isConfirmed) {
+      refetchTotal()
+      refetchMyCount()
+      fetchEvents()
+    }
+  }, [isConfirmed, refetchTotal, refetchMyCount, fetchEvents])
 
   const isWrongNetwork = isConnected && chain?.id !== arcTestnet.id
 
   function sendGM() {
-    resetSend()
-    sendTransaction({
-      to: GM_ADDRESS,
-      value: parseEther('0'),
-      data: GM_HEX,
+    resetWrite()
+    writeContract({
+      address: GM_CONTRACT_ADDRESS,
+      abi: GM_ABI,
+      functionName: 'gm',
     })
   }
 
@@ -94,25 +134,18 @@ export default function App() {
     setTimeout(() => setCopied(false), 2000)
   }
 
-  function connectMetaMask() {
-    connect({ connector: injected() })
-    setShowWalletMenu(false)
-  }
-
-  function connectWalletConnect() {
-    connect({ connector: walletConnect({ projectId }) })
-    setShowWalletMenu(false)
-  }
-
-  const explorerUrl = (hash: string) =>
+  const explorerTx = (hash: string) =>
     `${arcTestnet.blockExplorers.default.url}/tx/${hash}`
+
+  const explorerAddress = (addr: string) =>
+    `${arcTestnet.blockExplorers.default.url}/address/${addr}`
 
   return (
     <div className="min-h-screen bg-[#080a0f] text-white font-sans flex flex-col">
       {/* Ambient glow */}
       <div className="fixed inset-0 pointer-events-none overflow-hidden">
         <div className="absolute top-[-20%] left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-violet-600/10 rounded-full blur-[120px]" />
-        <div className="absolute bottom-[-10%] left-1/4 w-[400px] h-[300px] bg-blue-600/8 rounded-full blur-[100px]" />
+        <div className="absolute bottom-[-10%] left-1/4 w-[400px] h-[300px] bg-amber-600/5 rounded-full blur-[100px]" />
       </div>
 
       {/* Header */}
@@ -144,57 +177,51 @@ export default function App() {
             </button>
           </div>
         ) : (
-          <div className="relative">
-            <button
-              onClick={() => setShowWalletMenu(!showWalletMenu)}
-              disabled={isConnecting}
-              className="flex items-center gap-2 px-4 py-2 rounded-full bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium transition-all shadow-lg shadow-violet-600/25 disabled:opacity-60"
-            >
-              <Wallet className="w-4 h-4" />
-              {isConnecting ? 'Connecting…' : 'Connect Wallet'}
-            </button>
-            {showWalletMenu && (
-              <div className="absolute right-0 top-12 w-52 rounded-xl bg-[#0f1117] border border-white/10 shadow-2xl overflow-hidden z-50">
-                <button
-                  onClick={connectMetaMask}
-                  disabled={isConnecting}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-sm text-white/80 hover:bg-white/5 hover:text-white transition-all"
-                >
-                  🦊 MetaMask
-                </button>
-                <div className="border-t border-white/5" />
-                <button
-                  onClick={connectWalletConnect}
-                  disabled={isConnecting}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-sm text-white/80 hover:bg-white/5 hover:text-white transition-all"
-                >
-                  🔗 WalletConnect
-                </button>
-              </div>
-            )}
-          </div>
+          <button
+            onClick={() => connect({ connector: injected() })}
+            disabled={isConnecting}
+            className="flex items-center gap-2 px-4 py-2 rounded-full bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium transition-all shadow-lg shadow-violet-600/25 disabled:opacity-60"
+          >
+            <Wallet className="w-4 h-4" />
+            {isConnecting ? 'Connecting…' : 'Connect Wallet'}
+          </button>
         )}
       </header>
 
       {/* Main */}
-      <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-4 py-16">
+      <main className="relative z-10 flex-1 flex flex-col items-center px-4 py-16">
 
         {/* Hero */}
-        <div className="text-center mb-12">
+        <div className="text-center mb-10">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs font-medium mb-6">
-            <span>☀️</span>
-            Arc Testnet · Chain ID 5042002
+            ☀️ Arc Testnet · Chain ID 5042002
           </div>
           <h1 className="text-7xl sm:text-8xl font-black tracking-tighter bg-gradient-to-br from-white via-white/90 to-white/40 bg-clip-text text-transparent mb-4">
             GM
           </h1>
-          <p className="text-white/40 text-base max-w-sm mx-auto leading-relaxed">
-            Say good morning to the world — permanently, on-chain, on Arc network.
+          <p className="text-white/40 text-sm max-w-xs mx-auto leading-relaxed">
+            Say good morning permanently on-chain on Arc network.
           </p>
         </div>
 
+        {/* Stats row */}
+        <div className="flex items-center gap-4 mb-8">
+          <StatCard
+            label="Total GMs"
+            value={totalGMs !== undefined ? totalGMs.toString() : '…'}
+            emoji="🌍"
+          />
+          {isConnected && address && (
+            <StatCard
+              label="Your GMs"
+              value={myGMCount !== undefined ? myGMCount.toString() : '…'}
+              emoji="⭐"
+            />
+          )}
+        </div>
+
         {/* Action card */}
-        <div className="w-full max-w-md">
+        <div className="w-full max-w-md mb-10">
           <div className="rounded-2xl bg-white/[0.03] border border-white/[0.08] p-6 backdrop-blur-sm shadow-2xl">
 
             {!isConnected ? (
@@ -204,13 +231,14 @@ export default function App() {
                 </div>
                 <p className="text-white/60 text-sm mb-6">Connect your wallet to send a GM on-chain</p>
                 <button
-                  onClick={() => setShowWalletMenu(v => !v)}
-                  className="w-full py-3.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-semibold text-sm transition-all shadow-lg shadow-violet-600/25"
+                  onClick={() => connect({ connector: injected() })}
+                  disabled={isConnecting}
+                  className="w-full py-3.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-semibold text-sm transition-all shadow-lg shadow-violet-600/25 disabled:opacity-60"
                 >
-                  Connect Wallet
+                  {isConnecting ? 'Connecting…' : '🦊 Connect MetaMask'}
                 </button>
                 <p className="text-white/25 text-xs mt-4">
-                  Need testnet USDC for gas?{' '}
+                  Need testnet USDC?{' '}
                   <a href="https://faucet.circle.com" target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:text-violet-300 underline underline-offset-2">
                     Circle Faucet →
                   </a>
@@ -219,8 +247,8 @@ export default function App() {
             ) : isWrongNetwork ? (
               <div className="text-center py-4">
                 <AlertCircle className="w-10 h-10 text-amber-400 mx-auto mb-3" />
-                <p className="text-white/70 text-sm mb-1 font-medium">Wrong Network</p>
-                <p className="text-white/40 text-xs mb-5">Please switch to Arc Testnet in your wallet</p>
+                <p className="text-white/70 text-sm font-medium mb-1">Wrong Network</p>
+                <p className="text-white/40 text-xs mb-5">Switch to Arc Testnet in your wallet</p>
                 <div className="bg-amber-500/5 border border-amber-500/15 rounded-xl p-4 text-left space-y-1.5">
                   <InfoRow label="Network" value="Arc Testnet" />
                   <InfoRow label="Chain ID" value="5042002" />
@@ -230,6 +258,7 @@ export default function App() {
               </div>
             ) : (
               <div className="space-y-4">
+                {/* GM Button */}
                 <button
                   onClick={sendGM}
                   disabled={isSending || isConfirming}
@@ -239,37 +268,34 @@ export default function App() {
                 >
                   {isSending ? (
                     <span className="flex items-center justify-center gap-2">
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      Confirm in wallet…
+                      <Loader2 className="w-5 h-5 animate-spin" /> Confirm in wallet…
                     </span>
                   ) : isConfirming ? (
                     <span className="flex items-center justify-center gap-2">
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      Confirming on-chain…
+                      <Loader2 className="w-5 h-5 animate-spin" /> Confirming on-chain…
                     </span>
-                  ) : (
-                    '☀️ Send GM on-chain'
-                  )}
+                  ) : '☀️ Send GM on-chain'}
                 </button>
 
+                {/* Success */}
                 {isConfirmed && txHash && (
                   <div className="rounded-xl bg-emerald-500/5 border border-emerald-500/20 p-4 flex items-start gap-3">
                     <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
                     <div className="min-w-0">
                       <p className="text-emerald-400 text-sm font-semibold mb-1">GM sent! ☀️</p>
                       <a
-                        href={explorerUrl(txHash)}
+                        href={explorerTx(txHash)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="flex items-center gap-1 text-white/50 hover:text-white/80 text-xs transition-colors"
                       >
-                        <span>{shortenHash(txHash)}</span>
-                        <ExternalLink className="w-3 h-3 shrink-0" />
+                        {shortenHash(txHash)} <ExternalLink className="w-3 h-3 shrink-0" />
                       </a>
                     </div>
                   </div>
                 )}
 
+                {/* Error */}
                 {sendError && (
                   <div className="rounded-xl bg-red-500/5 border border-red-500/20 p-4 flex items-start gap-3">
                     <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
@@ -282,8 +308,16 @@ export default function App() {
                   </div>
                 )}
 
+                {/* Contract link */}
                 <div className="flex items-center justify-between px-1 text-xs text-white/25">
-                  <span>Data: <code className="text-white/40">0x474d</code> = "GM"</span>
+                  <a
+                    href={explorerAddress(GM_CONTRACT_ADDRESS)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1 hover:text-white/50 transition-colors"
+                  >
+                    Contract <ExternalLink className="w-3 h-3" />
+                  </a>
                   <a
                     href="https://testnet.arcscan.app"
                     target="_blank"
@@ -298,49 +332,97 @@ export default function App() {
           </div>
         </div>
 
-        {/* GM History */}
-        {gmRecords.length > 0 && (
-          <div className="w-full max-w-md mt-8">
-            <h2 className="text-white/40 text-xs font-medium uppercase tracking-widest mb-3 px-1">
-              Your GM History
+        {/* Recent GMs Feed */}
+        <div className="w-full max-w-md">
+          <div className="flex items-center justify-between mb-3 px-1">
+            <h2 className="text-white/40 text-xs font-medium uppercase tracking-widest">
+              Recent GMs on-chain
             </h2>
+            <button
+              onClick={fetchEvents}
+              disabled={loadingEvents}
+              className="flex items-center gap-1 text-white/30 hover:text-white/60 text-xs transition-colors"
+            >
+              <RefreshCw className={`w-3 h-3 ${loadingEvents ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
+          </div>
+
+          {loadingEvents && recentGMs.length === 0 ? (
+            <div className="flex items-center justify-center py-12 text-white/20 text-sm gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading GMs…
+            </div>
+          ) : recentGMs.length === 0 ? (
+            <div className="text-center py-12 text-white/20 text-sm">
+              No GMs yet — be the first! ☀️
+            </div>
+          ) : (
             <div className="space-y-2">
-              {gmRecords.map((r, i) => (
-                <a
+              {recentGMs.map((g, i) => (
+                <div
                   key={i}
-                  href={explorerUrl(r.txHash)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center justify-between px-4 py-3 rounded-xl bg-white/[0.03] border border-white/[0.06] hover:border-white/[0.12] hover:bg-white/[0.05] transition-all group"
+                  className="flex items-center justify-between px-4 py-3 rounded-xl bg-white/[0.03] border border-white/[0.06] hover:border-white/[0.1] transition-all"
                 >
                   <div className="flex items-center gap-3">
-                    <span className="text-lg">☀️</span>
+                    <span className="text-xl">☀️</span>
                     <div>
-                      <p className="text-white/70 text-sm font-medium group-hover:text-white transition-colors">
-                        {shortenHash(r.txHash)}
-                      </p>
-                      <p className="text-white/30 text-xs">{shortenAddress(r.address)}</p>
+                      <a
+                        href={explorerAddress(g.sender)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-white/70 text-sm font-medium hover:text-white transition-colors"
+                      >
+                        {shortenAddress(g.sender)}
+                      </a>
+                      <p className="text-white/30 text-xs">said GM</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 text-white/30 text-xs">
-                    <span>{timeAgo(r.timestamp)}</span>
-                    <ExternalLink className="w-3.5 h-3.5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  <div className="flex items-center gap-2">
+                    <span className="text-white/25 text-xs">{timeAgo(g.timestamp)}</span>
+                    {g.txHash && (
+                      <a
+                        href={explorerTx(g.txHash)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-white/20 hover:text-white/50 transition-colors"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </a>
+                    )}
                   </div>
-                </a>
+                </div>
               ))}
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </main>
 
       {/* Footer */}
-      <footer className="relative z-10 text-center py-6 text-white/20 text-xs border-t border-white/5">
-        Built on{' '}
-        <a href="https://arc.network" target="_blank" rel="noopener noreferrer" className="text-white/40 hover:text-white/60 transition-colors">
+      <footer className="relative z-10 text-center py-6 text-white/20 text-xs border-t border-white/5 mt-16">
+        Contract{' '}
+        <a
+          href={explorerAddress(GM_CONTRACT_ADDRESS)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-white/35 hover:text-white/60 font-mono transition-colors"
+        >
+          {shortenAddress(GM_CONTRACT_ADDRESS)}
+        </a>
+        {' '}· Built on{' '}
+        <a href="https://arc.network" target="_blank" rel="noopener noreferrer" className="text-white/35 hover:text-white/60 transition-colors">
           Arc Network
         </a>
-        {' '}· GM = <code className="text-white/35">0x474d</code>
       </footer>
+    </div>
+  )
+}
+
+function StatCard({ label, value, emoji }: { label: string; value: string; emoji: string }) {
+  return (
+    <div className="flex flex-col items-center px-6 py-4 rounded-2xl bg-white/[0.03] border border-white/[0.08]">
+      <span className="text-2xl mb-1">{emoji}</span>
+      <span className="text-2xl font-black text-white tracking-tight">{value}</span>
+      <span className="text-white/30 text-xs mt-0.5">{label}</span>
     </div>
   )
 }

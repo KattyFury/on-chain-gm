@@ -1,0 +1,42 @@
+{
+  "_format": "hh3-sol-build-info-1",
+  "id": "solc-0_8_20-d2d96e7f5f14b493d96e6455351019f3d35e16af",
+  "solcVersion": "0.8.20",
+  "solcLongVersion": "0.8.20+commit.a1b79de6",
+  "compilerType": "solc",
+  "userSourceNameMap": {
+    "contracts/GM.sol": "project/contracts/GM.sol"
+  },
+  "input": {
+    "language": "Solidity",
+    "settings": {
+      "evmVersion": "shanghai",
+      "outputSelection": {
+        "*": {
+          "": [
+            "ast"
+          ],
+          "*": [
+            "abi",
+            "evm.bytecode.linkReferences",
+            "evm.bytecode.object",
+            "evm.bytecode.opcodes",
+            "evm.bytecode.sourceMap",
+            "evm.deployedBytecode.immutableReferences",
+            "evm.deployedBytecode.linkReferences",
+            "evm.deployedBytecode.object",
+            "evm.deployedBytecode.opcodes",
+            "evm.deployedBytecode.sourceMap",
+            "evm.methodIdentifiers"
+          ]
+        }
+      },
+      "remappings": []
+    },
+    "sources": {
+      "project/contracts/GM.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\n/// @title OnChain GM\n/// @notice Say GM permanently on the Arc blockchain\ncontract GM {\n    // Emitted every time someone says GM\n    event GMSent(address indexed sender, uint256 timestamp);\n\n    // How many times each address has said GM\n    mapping(address => uint256) public gmCount;\n\n    // Total GMs sent by everyone\n    uint256 public totalGMs;\n\n    /// @notice Say GM on-chain\n    function gm() external {\n        gmCount[msg.sender]++;\n        totalGMs++;\n        emit GMSent(msg.sender, block.timestamp);\n    }\n}\n"
+      }
+    }
+  }
+}
